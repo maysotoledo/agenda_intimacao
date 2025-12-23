@@ -108,6 +108,10 @@ class Evento extends Model
 }
 ```
 
+### cria resource do Evento
+```sh
+php artisan make:filament-resource Evento
+```
 
 
 ### quando criar usuario selecionar o tipo
@@ -185,7 +189,7 @@ use Illuminate\Validation\ValidationException;
 use Saade\FilamentFullCalendar\Actions;
 use Saade\FilamentFullCalendar\Widgets\FullCalendarWidget;
 
-class DashboardCalendarWidget extends FullCalendarWidget
+class CalendarWidget extends FullCalendarWidget
 {
     use HasWidgetShield;
 
@@ -425,5 +429,8 @@ class DashboardCalendarWidget extends FullCalendarWidget
 
 ```
 
+```sh
+php artisan shield:generate --all --panel=admin
+```
 
 
