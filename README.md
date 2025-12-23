@@ -180,7 +180,6 @@ use Filament\Notifications\Notification;
 use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Components\Utilities\Set;
 use Filament\Schemas\Schema;
-use Filament\Support\Exceptions\Halt;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Validation\ValidationException;
 use Saade\FilamentFullCalendar\Actions;
@@ -204,6 +203,9 @@ class CalendarWidget extends FullCalendarWidget
             'unselectAuto' => true,
             'firstDay' => 1,
 
+            // ✅ habilita drag & drop
+            'editable' => true,
+
             // ✅ 24h
             'locale' => 'pt-br',
             'slotLabelFormat' => [
@@ -220,42 +222,122 @@ class CalendarWidget extends FullCalendarWidget
     }
 
     /**
-     * ✅ Chamado pelo JS do dateClick antes de abrir o modal.
-     * Retorna true se o dia tiver ao menos 1 horário livre; senão notifica e retorna false.
+     * ✅ Hook do FullCalendar para arrasto com SNAP antes de abrir modal.
      */
-    public function checkDayHasHours(string $dateStr): bool
+    public function eventDrop(): string
     {
-        $dia = Carbon::parse($dateStr)->toDateString();
+        return <<<JS
+            function(info) {
+                const lw = info.view.calendar.el.__livewire;
+                const plain = info.event.toPlainObject();
 
-        $options = $this->availableHourOptions($dia);
+                lw.call('validateDrop', {
+                    id: plain.id,
+                    start: plain.start,
+                    end: plain.end
+                }).then(function(result) {
+
+                    // ❌ Sem horários no dia: reverte e (com delay) refaz fetch
+                    if (!result || result.status === 'reject') {
+                        info.revert();
+
+                        setTimeout(function () {
+                            info.view.calendar.refetchEvents();
+                        }, 350);
+
+                        return;
+                    }
+
+                    // ✅ SNAP visual IMEDIATO (para ok e adjust)
+                    if (result.start) {
+                        info.event.setStart(result.start);
+                        plain.start = result.start;
+                    }
+                    if (result.end) {
+                        info.event.setEnd(result.end);
+                        plain.end = result.end;
+                    }
+
+                    // ✅ abre modal de edição já com dados ajustados (usuário pode trocar o horário)
+                    lw.mountAction('edit', { event: plain });
+
+                }).catch(function() {
+                    info.revert();
+
+                    setTimeout(function () {
+                        info.view.calendar.refetchEvents();
+                    }, 350);
+                });
+            }
+        JS;
+    }
+
+    /**
+     * ✅ Valida um drop (arrasto) e devolve o horário "snapado".
+     * - reject: não tem horários no dia
+     * - adjust: horário do drop não está disponível → ajusta para 1º horário livre
+     * - ok: mantém o horário (normalizado para HH:00)
+     */
+    public function validateDrop(array $payload): array
+    {
+        $id = (int) ($payload['id'] ?? 0);
+        $startRaw = $payload['start'] ?? null;
+
+        if (! $startRaw) {
+            return ['status' => 'reject'];
+        }
+
+        $start = Carbon::parse($startRaw);
+        $dia = $start->toDateString();
+
+        $options = $this->availableHourOptions($dia, $id);
 
         if (empty($options)) {
             $this->notifySemHorario($dia);
-            return false;
+            return ['status' => 'reject'];
         }
 
-        return true;
+        // Trabalhamos com blocos HH:00
+        $horaDesejada = $start->format('H:00');
+
+        // Se caiu num horário fora do permitido ou já ocupado, ajusta pro primeiro livre
+        if (! array_key_exists($horaDesejada, $options)) {
+            $horaSelecionada = array_key_first($options);
+
+            $inicio = Carbon::parse("{$dia} {$horaSelecionada}");
+            $fim = $inicio->copy()->addHour();
+
+            $this->notifyHorarioAjustado($dia, $horaSelecionada);
+
+            return [
+                'status' => 'adjust',
+                'start' => $inicio->toIso8601String(),
+                'end' => $fim->toIso8601String(),
+            ];
+        }
+
+        // ok: normaliza para HH:00 e 1h de duração
+        $inicio = Carbon::parse("{$dia} {$horaDesejada}");
+        $fim = $inicio->copy()->addHour();
+
+        return [
+            'status' => 'ok',
+            'start' => $inicio->toIso8601String(),
+            'end' => $fim->toIso8601String(),
+        ];
     }
 
     public function dateClick(): string
     {
         return <<<JS
             function(info) {
-                info.view.calendar.select(info.dateStr);
+                // ✅ NÃO chamar calendar.select() aqui
 
-                // ✅ Antes de abrir modal, valida com o backend se há horários no dia
-                info.view.calendar.el.__livewire.call('checkDayHasHours', info.dateStr)
-                    .then(function(ok) {
-                        if (!ok) {
-                            info.view.calendar.unselect();
-                            return;
-                        }
-
-                        info.view.calendar.el.__livewire.mountAction('create', {
-                            start: info.dateStr,
-                            end: info.dateStr
-                        });
-                    });
+                // ✅ sempre abre o modal; se não houver horário, o modal exibirá o aviso e bloqueará salvar
+                info.view.calendar.el.__livewire.mountAction('create', {
+                    start: info.dateStr,
+                    end: info.dateStr
+                });
             }
         JS;
     }
@@ -352,11 +434,40 @@ class CalendarWidget extends FullCalendarWidget
             TextInput::make('titulo')
                 ->label('Título')
                 ->required()
-                ->maxLength(255),
+                ->maxLength(255)
+                // ✅ desabilita tudo se não houver horário (starts_at vazio)
+                ->disabled(fn (Get $get) => blank($get('starts_at'))),
 
             Placeholder::make('data_visual')
                 ->label('Data')
                 ->content(fn (Get $get) => $get('dia') ?: '-'),
+
+            // ✅ aviso dentro do modal quando não existir horário livre
+            Placeholder::make('sem_horario_aviso')
+                ->label('')
+                ->content(function (Get $get) {
+                    $dia = $get('dia');
+                    if (! $dia) {
+                        return null;
+                    }
+
+                    $options = $this->availableHourOptions($dia, $get('evento_id'));
+                    if (! empty($options)) {
+                        return null;
+                    }
+
+                    $data = Carbon::parse($dia)->format('d/m/Y');
+                    return "⚠️ No dia {$data} não há horários disponíveis.";
+                })
+                ->visible(function (Get $get) {
+                    $dia = $get('dia');
+                    if (! $dia) {
+                        return false;
+                    }
+
+                    $options = $this->availableHourOptions($dia, $get('evento_id'));
+                    return empty($options);
+                }),
 
             Select::make('hora_inicio')
                 ->label('Horário')
@@ -364,7 +475,23 @@ class CalendarWidget extends FullCalendarWidget
                     $get('dia'),
                     $get('evento_id')
                 ))
-                ->required()
+                // ✅ se não há opções, desabilita e NÃO exige
+                ->disabled(function (Get $get) {
+                    $dia = $get('dia');
+                    if (! $dia) {
+                        return false;
+                    }
+
+                    return empty($this->availableHourOptions($dia, $get('evento_id')));
+                })
+                ->required(function (Get $get) {
+                    $dia = $get('dia');
+                    if (! $dia) {
+                        return true;
+                    }
+
+                    return ! empty($this->availableHourOptions($dia, $get('evento_id')));
+                })
                 ->live()
                 ->afterStateUpdated(function (?string $state, Set $set, Get $get) {
                     $dia = $get('dia');
@@ -380,8 +507,50 @@ class CalendarWidget extends FullCalendarWidget
                     $set('ends_at', $fim->toDateTimeString());
                 }),
 
-            Hidden::make('starts_at')->required(),
-            Hidden::make('ends_at')->required(),
+            Hidden::make('starts_at')
+                ->required(function (Get $get) {
+                    $dia = $get('dia');
+                    if (! $dia) {
+                        return true;
+                    }
+
+                    return ! empty($this->availableHourOptions($dia, $get('evento_id')));
+                }),
+
+            Hidden::make('ends_at')
+                ->required(function (Get $get) {
+                    $dia = $get('dia');
+                    if (! $dia) {
+                        return true;
+                    }
+
+                    return ! empty($this->availableHourOptions($dia, $get('evento_id')));
+                }),
+
+            /**
+             * ✅ Desabilita o botão "Salvar" do modal quando starts_at estiver vazio
+             * (sem depender de modalSubmitAction, que na sua versão está vindo null).
+             */
+            Placeholder::make('disable_submit_when_no_hours')
+                ->label('')
+                ->content('')
+                ->extraAttributes([
+                    'style' => 'display:none',
+                    'x-data' => '{}',
+                    'x-effect' => <<<'JS'
+                        const root =
+                            $el.closest('.fi-modal') ||
+                            $el.closest('[role="dialog"]') ||
+                            document;
+
+                        const submit = root.querySelector('button[type="submit"]');
+                        const startsAt = $wire.get('mountedActionsData.0.starts_at');
+
+                        if (submit) {
+                            submit.disabled = !startsAt;
+                        }
+                    JS,
+                ]),
         ];
     }
 
@@ -395,6 +564,7 @@ class CalendarWidget extends FullCalendarWidget
                         ? Carbon::parse($arguments['start'])->toDateString()
                         : null;
 
+                    // Se abriu sem dia (botão), mantém aviso
                     if (! $dia) {
                         Notification::make()
                             ->title('Selecione um dia')
@@ -402,16 +572,36 @@ class CalendarWidget extends FullCalendarWidget
                             ->warning()
                             ->send();
 
-                        throw new Halt();
+                        // ainda abre o modal, mas sem dia não faz sentido: deixa vazio
+                        $form->fill([
+                            'evento_id' => null,
+                            'dia' => null,
+                            'hora_inicio' => null,
+                            'starts_at' => null,
+                            'ends_at' => null,
+                        ]);
+
+                        return;
                     }
 
                     $options = $this->availableHourOptions($dia);
 
+                    // ✅ se não há horário: preenche tudo null (isso trava tudo no form)
                     if (empty($options)) {
                         $this->notifySemHorario($dia);
-                        throw new Halt();
+
+                        $form->fill([
+                            'evento_id' => null,
+                            'dia' => $dia,
+                            'hora_inicio' => null,
+                            'starts_at' => null,
+                            'ends_at' => null,
+                        ]);
+
+                        return;
                     }
 
+                    // ✅ pega o primeiro horário disponível do dia
                     $hora = array_key_first($options);
 
                     $inicio = Carbon::parse("{$dia} {$hora}");
@@ -426,6 +616,13 @@ class CalendarWidget extends FullCalendarWidget
                     ]);
                 })
                 ->mutateFormDataUsing(function (array $data): array {
+                    // ✅ se não tem starts_at, é porque não tinha horário disponível
+                    if (empty($data['starts_at'])) {
+                        throw ValidationException::withMessages([
+                            'hora_inicio' => 'Não há horário disponível para este dia.',
+                        ]);
+                    }
+
                     $start = Carbon::parse($data['starts_at']);
 
                     $jaExiste = Agenda::query()
@@ -456,8 +653,6 @@ class CalendarWidget extends FullCalendarWidget
                     $startArg = data_get($arguments, 'event.start');
                     $endArg   = data_get($arguments, 'event.end');
 
-                    $isDragDrop = (bool) $startArg;
-
                     $start = $startArg
                         ? Carbon::parse($startArg)
                         : Carbon::parse($record->starts_at);
@@ -469,34 +664,6 @@ class CalendarWidget extends FullCalendarWidget
                             : $start->copy()->addHour());
 
                     $dia = $start->toDateString();
-
-                    // ✅ Se veio de drag&drop:
-                    // 1) se o DIA não tem nenhum horário livre: avisa e cancela (evento volta após refresh)
-                    // 2) se o HORÁRIO do drop não está disponível: preenche o primeiro horário livre (usuário pode mudar no select)
-                    if ($isDragDrop) {
-                        $options = $this->availableHourOptions($dia, (int) $record->getKey());
-
-                        if (empty($options)) {
-                            $this->notifySemHorario($dia);
-
-                            // força re-render pra voltar visualmente o evento
-                            $this->dispatch('$refresh');
-
-                            throw new Halt();
-                        }
-
-                        $horaDesejada = $start->format('H:00');
-
-                        if (! array_key_exists($horaDesejada, $options)) {
-                            $horaSelecionada = array_key_first($options);
-
-                            $start = Carbon::parse("{$dia} {$horaSelecionada}");
-                            $end = $start->copy()->addHour();
-
-                            $this->notifyHorarioAjustado($dia, $horaSelecionada);
-                        }
-                    }
-
                     $hora = $start->format('H:00');
 
                     $form->fill([
