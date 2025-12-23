@@ -144,7 +144,7 @@ composer require saade/filament-fullcalendar:"v4.0.0-beta2" -W
 ### criar widget do full calendar
 #### Selecione o "Custom" apos rodar o comando abaixo
 ```sh
-php artisan make:filament-widget CalendarWidget
+php artisan make:filament-widget CalendarWidget --panel=admin
 ```
 
 
