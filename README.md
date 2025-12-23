@@ -108,11 +108,6 @@ class Evento extends Model
 }
 ```
 
-### cria resource do Evento
-```sh
-php artisan make:filament-resource Evento
-```
-
 
 ### quando criar usuario selecionar o tipo
 #### app/Filament/Resources/User/Schemas/UserForm.php
