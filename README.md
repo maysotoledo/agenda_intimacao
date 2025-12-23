@@ -169,7 +169,7 @@ use Saade\FilamentFullCalendar\FilamentFullCalendarPlugin;
 
 namespace App\Filament\Widgets;
 
-use App\Models\Evento;
+use App\Models\Agenda;
 use BezhanSalleh\FilamentShield\Traits\HasWidgetShield;
 use Carbon\Carbon;
 use Filament\Forms\Components\Hidden;
@@ -188,7 +188,7 @@ class CalendarWidget extends FullCalendarWidget
 {
     use HasWidgetShield;
 
-    public Model|string|null $model = Evento::class;
+    public Model|string|null $model = Agenda::class;
 
     public static function getHeading(): string
     {
@@ -260,7 +260,7 @@ class CalendarWidget extends FullCalendarWidget
             return $options;
         }
 
-        $ocupados = Evento::query()
+        $ocupados = Agenda::query()
             ->whereDate('starts_at', $dia)
             ->when($ignoreEventoId, fn ($q) => $q->whereKeyNot($ignoreEventoId))
             ->pluck('starts_at')
@@ -280,13 +280,13 @@ class CalendarWidget extends FullCalendarWidget
         $start = Carbon::parse($fetchInfo['start']);
         $end = Carbon::parse($fetchInfo['end']);
 
-        return Evento::query()
+        return Agenda::query()
             ->where('starts_at', '<', $end)
             ->where(function ($q) use ($start) {
                 $q->whereNull('ends_at')->orWhere('ends_at', '>', $start);
             })
             ->get()
-            ->map(fn (Evento $e) => [
+            ->map(fn (Agenda $e) => [
                 'id' => (string) $e->id,
                 'title' => $e->titulo,
                 'start' => $e->starts_at,
@@ -298,6 +298,7 @@ class CalendarWidget extends FullCalendarWidget
     public function getFormSchema(): array
     {
         return [
+            Hidden::make('evento_id')->dehydrated(false), // ✅ novo (para ignorar ele mesmo na edição)
             Hidden::make('dia')->dehydrated(false),
 
             TextInput::make('titulo')
@@ -311,7 +312,10 @@ class CalendarWidget extends FullCalendarWidget
 
             Select::make('hora_inicio')
                 ->label('Horário')
-                ->options(fn (Get $get) => $this->availableHourOptions($get('dia')))
+                ->options(fn (Get $get) => $this->availableHourOptions(
+                    $get('dia'),
+                    $get('evento_id') // ✅ ignora o próprio evento na edição
+                ))
                 ->required()
                 ->live()
                 ->afterStateUpdated(function (?string $state, Set $set, Get $get) {
@@ -351,6 +355,7 @@ class CalendarWidget extends FullCalendarWidget
                     $fim = $inicio ? $inicio->copy()->addHour() : null;
 
                     $form->fill([
+                        'evento_id' => null, // ✅ novo
                         'dia' => $dia,
                         'hora_inicio' => $hora,
                         'starts_at' => $inicio?->toDateTimeString(),
@@ -360,7 +365,7 @@ class CalendarWidget extends FullCalendarWidget
                 ->mutateFormDataUsing(function (array $data): array {
                     $start = Carbon::parse($data['starts_at']);
 
-                    $jaExiste = Evento::query()
+                    $jaExiste = Agenda::query()
                         ->whereDate('starts_at', $start->toDateString())
                         ->whereTime('starts_at', $start->format('H:i:s'))
                         ->exists();
@@ -371,7 +376,7 @@ class CalendarWidget extends FullCalendarWidget
                         ]);
                     }
 
-                    unset($data['dia'], $data['hora_inicio']);
+                    unset($data['dia'], $data['hora_inicio'], $data['evento_id']); // ✅ novo
 
                     return $data;
                 }),
@@ -382,24 +387,40 @@ class CalendarWidget extends FullCalendarWidget
     {
         return [
             Actions\EditAction::make()
-                ->mountUsing(function (Schema $form, Model $record) {
-                    /** @var Evento $record */
-                    $dia = Carbon::parse($record->starts_at)->toDateString();
-                    $hora = Carbon::parse($record->starts_at)->format('H:00');
+                ->mountUsing(function (Schema $form, Model $record, array $arguments) {
+                    /** @var Agenda $record */
+
+                    // ✅ Se veio de drag&drop, use a nova data/hora do evento
+                    $startArg = data_get($arguments, 'event.start');
+                    $endArg   = data_get($arguments, 'event.end');
+
+                    $start = $startArg
+                        ? Carbon::parse($startArg)
+                        : Carbon::parse($record->starts_at);
+
+                    $end = $endArg
+                        ? Carbon::parse($endArg)
+                        : ($record->ends_at
+                            ? Carbon::parse($record->ends_at)
+                            : $start->copy()->addHour());
+
+                    $dia  = $start->toDateString();
+                    $hora = $start->format('H:00');
 
                     $form->fill([
+                        'evento_id' => $record->getKey(), // ✅ novo
                         'dia' => $dia,
                         'hora_inicio' => $hora,
                         'titulo' => $record->titulo,
-                        'starts_at' => Carbon::parse($record->starts_at)->toDateTimeString(),
-                        'ends_at' => $record->ends_at ? Carbon::parse($record->ends_at)->toDateTimeString() : null,
+                        'starts_at' => $start->toDateTimeString(),
+                        'ends_at' => $end?->toDateTimeString(),
                     ]);
                 })
                 ->mutateFormDataUsing(function (array $data, Model $record): array {
-                    /** @var Evento $record */
+                    /** @var Agenda $record */
                     $start = Carbon::parse($data['starts_at']);
 
-                    $jaExiste = Evento::query()
+                    $jaExiste = Agenda::query()
                         ->whereKeyNot($record->getKey())
                         ->whereDate('starts_at', $start->toDateString())
                         ->whereTime('starts_at', $start->format('H:i:s'))
@@ -411,7 +432,7 @@ class CalendarWidget extends FullCalendarWidget
                         ]);
                     }
 
-                    unset($data['dia'], $data['hora_inicio']);
+                    unset($data['dia'], $data['hora_inicio'], $data['evento_id']); // ✅ novo
 
                     return $data;
                 }),
