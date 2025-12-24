@@ -169,7 +169,7 @@ use Saade\FilamentFullCalendar\FilamentFullCalendarPlugin;
 
 namespace App\Filament\Widgets;
 
-use App\Models\Agenda;
+use App\Models\Evento;
 use BezhanSalleh\FilamentShield\Traits\HasWidgetShield;
 use Carbon\Carbon;
 use Filament\Forms\Components\Hidden;
@@ -189,7 +189,7 @@ class CalendarWidget extends FullCalendarWidget
 {
     use HasWidgetShield;
 
-    public Model|string|null $model = Agenda::class;
+    public Model|string|null $model = Evento::class;
 
     public static function getHeading(): string
     {
@@ -390,7 +390,7 @@ class CalendarWidget extends FullCalendarWidget
             return $options;
         }
 
-        $ocupados = Agenda::query()
+        $ocupados = Evento::query()
             ->whereDate('starts_at', $dia)
             ->when($ignoreEventoId, fn ($q) => $q->whereKeyNot($ignoreEventoId))
             ->pluck('starts_at')
@@ -410,13 +410,13 @@ class CalendarWidget extends FullCalendarWidget
         $start = Carbon::parse($fetchInfo['start']);
         $end = Carbon::parse($fetchInfo['end']);
 
-        return Agenda::query()
+        return Evento::query()
             ->where('starts_at', '<', $end)
             ->where(function ($q) use ($start) {
                 $q->whereNull('ends_at')->orWhere('ends_at', '>', $start);
             })
             ->get()
-            ->map(fn (Agenda $e) => [
+            ->map(fn (Evento $e) => [
                 'id' => (string) $e->id,
                 'title' => $e->titulo,
                 'start' => $e->starts_at,
@@ -625,7 +625,7 @@ class CalendarWidget extends FullCalendarWidget
 
                     $start = Carbon::parse($data['starts_at']);
 
-                    $jaExiste = Agenda::query()
+                    $jaExiste = Evento::query()
                         ->whereDate('starts_at', $start->toDateString())
                         ->whereTime('starts_at', $start->format('H:i:s'))
                         ->exists();
@@ -648,7 +648,7 @@ class CalendarWidget extends FullCalendarWidget
         return [
             Actions\EditAction::make()
                 ->mountUsing(function (Schema $form, Model $record, array $arguments) {
-                    /** @var Agenda $record */
+                    /** @var Evento $record */
 
                     $startArg = data_get($arguments, 'event.start');
                     $endArg   = data_get($arguments, 'event.end');
@@ -676,10 +676,10 @@ class CalendarWidget extends FullCalendarWidget
                     ]);
                 })
                 ->mutateFormDataUsing(function (array $data, Model $record): array {
-                    /** @var Agenda $record */
+                    /** @var Evento $record */
                     $start = Carbon::parse($data['starts_at']);
 
-                    $jaExiste = Agenda::query()
+                    $jaExiste = Evento::query()
                         ->whereKeyNot($record->getKey())
                         ->whereDate('starts_at', $start->toDateString())
                         ->whereTime('starts_at', $start->format('H:i:s'))
@@ -700,6 +700,7 @@ class CalendarWidget extends FullCalendarWidget
         ];
     }
 }
+
 
 
 ```
