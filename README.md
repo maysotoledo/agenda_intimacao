@@ -810,37 +810,53 @@ class SelecionarUsuarioAgendaWidget extends Widget implements Forms\Contracts\Ha
 {
     use Forms\Concerns\InteractsWithForms;
 
-    // ✅ Filament v4: $view NÃO é static
     protected string $view = 'filament.widgets.selecionar-usuario-agenda-widget';
 
     public ?int $agendaUserId = null;
 
     public function mount(): void
     {
-        $this->agendaUserId = session('agenda_user_id');
+        $sessionUserId = session('agenda_user_id');
+
+        // Garante que o user_id em sessão é realmente um EPC.
+        $this->agendaUserId = User::query()
+            ->role('epc')
+            ->whereKey($sessionUserId)
+            ->value('id');
+
+        if ($this->agendaUserId) {
+            session(['agenda_user_id' => $this->agendaUserId]);
+        } else {
+            session()->forget('agenda_user_id');
+        }
 
         $this->form->fill([
             'agendaUserId' => $this->agendaUserId,
         ]);
     }
 
-    // ✅ Filament v4: usa Schema (não Form)
     public function form(Schema $form): Schema
     {
         return $form->schema([
             Forms\Components\Select::make('agendaUserId')
-                ->label('Selecionar usuário')
-                ->options(fn () => User::query()->orderBy('name')->pluck('name', 'id')->all())
+                ->label('Selecionar usuário (EPC)')
+                ->options(fn () => User::query()
+                    ->role('epc')
+                    ->orderBy('name')
+                    ->pluck('name', 'id')
+                    ->all()
+                )
                 ->searchable()
                 ->preload()
                 ->live()
                 ->afterStateUpdated(function (?int $state) {
                     $this->agendaUserId = $state;
 
-                    session(['agenda_user_id' => $state]);
-
                     if ($state) {
+                        session(['agenda_user_id' => $state]);
                         $this->dispatch('agendaUserSelected', userId: $state);
+                    } else {
+                        session()->forget('agenda_user_id');
                     }
                 }),
         ]);
