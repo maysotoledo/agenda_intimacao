@@ -814,19 +814,59 @@ class SelecionarUsuarioAgendaWidget extends Widget implements Forms\Contracts\Ha
 
     public ?int $agendaUserId = null;
 
+    public bool $hasEpcUsers = false;
+
+    public bool $hasSingleEpcUser = false;
+
+    public static function canView(): bool
+    {
+        $user = auth()->user();
+
+        // Se o usuário logado é EPC, ele não escolhe outro usuário.
+        return (bool) $user && ! $user->hasRole('epc');
+    }
+
     public function mount(): void
     {
+        $epcCount = User::query()->role('epc')->count();
+
+        $this->hasEpcUsers = $epcCount > 0;
+        $this->hasSingleEpcUser = $epcCount === 1;
+
+        // Se não há EPC, limpa tudo e mostra placeholder
+        if (! $this->hasEpcUsers) {
+            session()->forget('agenda_user_id');
+
+            $this->agendaUserId = null;
+
+            $this->form->fill([
+                'agendaUserId' => null,
+            ]);
+
+            return;
+        }
+
         $sessionUserId = session('agenda_user_id');
 
-        // Garante que o user_id em sessão é realmente um EPC.
-        $this->agendaUserId = User::query()
+        // Valida sessão: só aceita se for EPC
+        $validSessionUserId = User::query()
             ->role('epc')
             ->whereKey($sessionUserId)
             ->value('id');
 
-        if ($this->agendaUserId) {
+        if ($validSessionUserId) {
+            $this->agendaUserId = (int) $validSessionUserId;
+        } elseif ($this->hasSingleEpcUser) {
+            // Se só existe 1 EPC, auto-seleciona
+            $this->agendaUserId = (int) User::query()->role('epc')->value('id');
+
             session(['agenda_user_id' => $this->agendaUserId]);
+
+            // Dispara evento pra atualizar o calendário imediatamente
+            $this->dispatch('agendaUserSelected', userId: $this->agendaUserId);
         } else {
+            // Sem seleção válida e há mais de 1 EPC: força escolher
+            $this->agendaUserId = null;
             session()->forget('agenda_user_id');
         }
 
@@ -838,6 +878,16 @@ class SelecionarUsuarioAgendaWidget extends Widget implements Forms\Contracts\Ha
     public function form(Schema $form): Schema
     {
         return $form->schema([
+            Forms\Components\Placeholder::make('no_epc_users')
+                ->label('')
+                ->content('Nenhum usuário com a role "epc" foi encontrado. Crie/atribua essa role a algum usuário para selecionar uma agenda.')
+                ->visible(fn (): bool => ! $this->hasEpcUsers),
+
+            Forms\Components\Placeholder::make('single_epc_info')
+                ->label('')
+                ->content('Existe apenas 1 usuário EPC. A agenda foi selecionada automaticamente.')
+                ->visible(fn (): bool => $this->hasSingleEpcUser),
+
             Forms\Components\Select::make('agendaUserId')
                 ->label('Selecionar usuário (EPC)')
                 ->options(fn () => User::query()
@@ -849,15 +899,30 @@ class SelecionarUsuarioAgendaWidget extends Widget implements Forms\Contracts\Ha
                 ->searchable()
                 ->preload()
                 ->live()
+                ->visible(fn (): bool => $this->hasEpcUsers)
+                ->disabled(fn (): bool => $this->hasSingleEpcUser) // opcional: evita “troca” quando só tem 1
                 ->afterStateUpdated(function (?int $state) {
-                    $this->agendaUserId = $state;
-
-                    if ($state) {
-                        session(['agenda_user_id' => $state]);
-                        $this->dispatch('agendaUserSelected', userId: $state);
-                    } else {
+                    if (! $state) {
+                        $this->agendaUserId = null;
                         session()->forget('agenda_user_id');
+
+                        return;
                     }
+
+                    // Garante que o selecionado é EPC
+                    $isEpc = User::query()->role('epc')->whereKey($state)->exists();
+
+                    if (! $isEpc) {
+                        $this->agendaUserId = null;
+                        session()->forget('agenda_user_id');
+
+                        return;
+                    }
+
+                    $this->agendaUserId = $state;
+                    session(['agenda_user_id' => $state]);
+
+                    $this->dispatch('agendaUserSelected', userId: $state);
                 }),
         ]);
     }
@@ -885,6 +950,7 @@ resources/views/filament/widgets/selecionar-usuario-agenda-widget.blade.php
 namespace App\Filament\Widgets;
 
 use App\Models\Evento;
+use App\Models\User;
 use BezhanSalleh\FilamentShield\Traits\HasWidgetShield;
 use Carbon\Carbon;
 use Filament\Forms\Components\Hidden;
@@ -911,15 +977,66 @@ class CalendarWidget extends FullCalendarWidget
 
     public function mount(): void
     {
-        $this->agendaUserId = session('agenda_user_id');
+        $user = auth()->user();
+
+        // Se o logado é EPC, sempre mostra a agenda dele
+        if ($user?->hasRole('epc')) {
+            $this->agendaUserId = (int) $user->getKey();
+            session(['agenda_user_id' => $this->agendaUserId]);
+
+            return;
+        }
+
+        $sessionUserId = session('agenda_user_id');
+
+        // Valida sessão: só aceita se for EPC
+        $validSessionUserId = User::query()
+            ->role('epc')
+            ->whereKey($sessionUserId)
+            ->value('id');
+
+        if ($validSessionUserId) {
+            $this->agendaUserId = (int) $validSessionUserId;
+
+            return;
+        }
+
+        // Auto-seleciona se só existir 1 EPC
+        $epcIds = User::query()->role('epc')->limit(2)->pluck('id');
+
+        if ($epcIds->count() === 1) {
+            $this->agendaUserId = (int) $epcIds->first();
+            session(['agenda_user_id' => $this->agendaUserId]);
+
+            return;
+        }
+
+        // Sem seleção válida
+        $this->agendaUserId = null;
+        session()->forget('agenda_user_id');
     }
 
     #[On('agendaUserSelected')]
     public function setAgendaUser(int $userId): void
     {
+        // EPC não pode trocar agenda via evento
+        if (auth()->user()?->hasRole('epc')) {
+            return;
+        }
+
+        // Garante que o selecionado é EPC
+        $isEpc = User::query()->role('epc')->whereKey($userId)->exists();
+
+        if (! $isEpc) {
+            $this->agendaUserId = null;
+            session()->forget('agenda_user_id');
+            $this->dispatch('$refresh');
+
+            return;
+        }
+
         $this->agendaUserId = $userId;
         session(['agenda_user_id' => $userId]);
-
         $this->dispatch('$refresh');
     }
 
@@ -930,8 +1047,20 @@ class CalendarWidget extends FullCalendarWidget
 
     public static function canView(): bool
     {
-        // ✅ só aparece se usuário foi selecionado
-        return (bool) session('agenda_user_id');
+        $user = auth()->user();
+
+        // EPC sempre vê
+        if ($user?->hasRole('epc')) {
+            return true;
+        }
+
+        // Não-EPC: vê se tiver usuário selecionado...
+        if (session('agenda_user_id')) {
+            return true;
+        }
+
+        // ...ou se existir apenas 1 EPC (auto-seleção)
+        return User::query()->role('epc')->count() === 1;
     }
 
     public function config(): array
@@ -1041,11 +1170,13 @@ class CalendarWidget extends FullCalendarWidget
                 ->disabled(function (Get $get) {
                     $dia = $get('dia');
                     if (! $dia) return false;
+
                     return empty($this->availableHourOptions($dia, $get('evento_id')));
                 })
                 ->required(function (Get $get) {
                     $dia = $get('dia');
                     if (! $dia) return true;
+
                     return ! empty($this->availableHourOptions($dia, $get('evento_id')));
                 })
                 ->live()
@@ -1064,6 +1195,7 @@ class CalendarWidget extends FullCalendarWidget
                 ->required(function (Get $get) {
                     $dia = $get('dia');
                     if (! $dia) return true;
+
                     return ! empty($this->availableHourOptions($dia, $get('evento_id')));
                 }),
 
@@ -1071,6 +1203,7 @@ class CalendarWidget extends FullCalendarWidget
                 ->required(function (Get $get) {
                     $dia = $get('dia');
                     if (! $dia) return true;
+
                     return ! empty($this->availableHourOptions($dia, $get('evento_id')));
                 }),
 
@@ -1087,7 +1220,6 @@ class CalendarWidget extends FullCalendarWidget
                             document;
                         const submit = root.querySelector('button[type="submit"]');
                         const startsAt = $wire.get('mountedActionsData.0.starts_at');
-
                         if (submit) {
                             submit.disabled = !startsAt;
                         }
@@ -1244,12 +1376,6 @@ class CalendarWidget extends FullCalendarWidget
                 })
                 ->mutateFormDataUsing(function (array $data, Model $record): array {
                     /** @var Evento $record */
-
-                    if (! $this->agendaUserId) {
-                        throw ValidationException::withMessages([
-                            'titulo' => 'Selecione um usuário para editar.',
-                        ]);
-                    }
 
                     $start = Carbon::parse($data['starts_at']);
 
