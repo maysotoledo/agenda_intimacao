@@ -890,6 +890,7 @@ class SelecionarUsuarioAgendaWidget extends Widget implements Forms\Contracts\Ha
 
             Forms\Components\Select::make('agendaUserId')
                 ->label('Selecionar usuário (EPC)')
+                ->placeholder($this->hasSingleEpcUser ? null : 'Selecione um usuário EPC...')
                 ->options(fn () => User::query()
                     ->role('epc')
                     ->orderBy('name')
@@ -899,13 +900,22 @@ class SelecionarUsuarioAgendaWidget extends Widget implements Forms\Contracts\Ha
                 ->searchable()
                 ->preload()
                 ->live()
-                ->visible(fn (): bool => $this->hasEpcUsers)
-                ->disabled(fn (): bool => $this->hasSingleEpcUser) // opcional: evita “troca” quando só tem 1
-                ->afterStateUpdated(function (?int $state) {
-                    if (! $state) {
-                        $this->agendaUserId = null;
-                        session()->forget('agenda_user_id');
 
+                // ✅ Filament v4: impede selecionar o placeholder (null) e remove o “clear”
+                ->selectablePlaceholder(false)
+
+                ->visible(fn (): bool => $this->hasEpcUsers)
+                ->disabled(fn (): bool => $this->hasSingleEpcUser)
+                ->required(fn (): bool => $this->hasEpcUsers && ! $this->hasSingleEpcUser)
+                ->afterStateUpdated(function (?int $state) {
+                    // Proteção extra: se por algum motivo vier null, restaura o valor anterior
+                    if (! $state) {
+                        if ($this->agendaUserId) {
+                            $this->form->fill(['agendaUserId' => $this->agendaUserId]);
+                            return;
+                        }
+
+                        session()->forget('agenda_user_id');
                         return;
                     }
 
@@ -913,8 +923,11 @@ class SelecionarUsuarioAgendaWidget extends Widget implements Forms\Contracts\Ha
                     $isEpc = User::query()->role('epc')->whereKey($state)->exists();
 
                     if (! $isEpc) {
-                        $this->agendaUserId = null;
-                        session()->forget('agenda_user_id');
+                        if ($this->agendaUserId) {
+                            $this->form->fill(['agendaUserId' => $this->agendaUserId]);
+                        } else {
+                            session()->forget('agenda_user_id');
+                        }
 
                         return;
                     }
@@ -953,6 +966,7 @@ use App\Models\Evento;
 use App\Models\User;
 use BezhanSalleh\FilamentShield\Traits\HasWidgetShield;
 use Carbon\Carbon;
+use Filament\Actions\Action as FilamentAction;
 use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Placeholder;
 use Filament\Forms\Components\Select;
@@ -997,7 +1011,6 @@ class CalendarWidget extends FullCalendarWidget
 
         if ($validSessionUserId) {
             $this->agendaUserId = (int) $validSessionUserId;
-
             return;
         }
 
@@ -1007,7 +1020,6 @@ class CalendarWidget extends FullCalendarWidget
         if ($epcIds->count() === 1) {
             $this->agendaUserId = (int) $epcIds->first();
             session(['agenda_user_id' => $this->agendaUserId]);
-
             return;
         }
 
@@ -1030,14 +1042,18 @@ class CalendarWidget extends FullCalendarWidget
         if (! $isEpc) {
             $this->agendaUserId = null;
             session()->forget('agenda_user_id');
-            $this->dispatch('$refresh');
+
+            // Atualiza o calendário na tela
+            $this->refreshRecords();
 
             return;
         }
 
         $this->agendaUserId = $userId;
         session(['agenda_user_id' => $userId]);
-        $this->dispatch('$refresh');
+
+        // ✅ Força o FullCalendar a buscar os eventos novamente
+        $this->refreshRecords();
     }
 
     public static function getHeading(): string
@@ -1045,22 +1061,13 @@ class CalendarWidget extends FullCalendarWidget
         return 'Calendário';
     }
 
+    /**
+     * ✅ Importante: não dependa de canView() com session para “aparecer depois”,
+     * porque isso não é reativo. Deixe o widget sempre visível e controle por estado.
+     */
     public static function canView(): bool
     {
-        $user = auth()->user();
-
-        // EPC sempre vê
-        if ($user?->hasRole('epc')) {
-            return true;
-        }
-
-        // Não-EPC: vê se tiver usuário selecionado...
-        if (session('agenda_user_id')) {
-            return true;
-        }
-
-        // ...ou se existir apenas 1 EPC (auto-seleção)
-        return User::query()->role('epc')->count() === 1;
+        return auth()->check();
     }
 
     public function config(): array
@@ -1147,7 +1154,6 @@ class CalendarWidget extends FullCalendarWidget
         return $options;
     }
 
-    // ✅ TEM QUE SER PUBLIC (FullCalendarWidget define como public)
     public function getFormSchema(): array
     {
         return [
@@ -1231,13 +1237,20 @@ class CalendarWidget extends FullCalendarWidget
     protected function headerActions(): array
     {
         return [
+            // ✅ Botão para ir ao Dashboard e selecionar o usuário (quando necessário)
+            FilamentAction::make('selecionarUsuario')
+                ->label('Selecionar usuário')
+                ->icon('heroicon-o-user')
+                ->visible(fn () => ! auth()->user()?->hasRole('epc') && ! $this->agendaUserId)
+                ->url(fn () => route('filament.admin.pages.dashboard')),
+
             Actions\CreateAction::make()
                 ->label('Agendar')
                 ->mountUsing(function (Schema $form, array $arguments) {
                     if (! $this->agendaUserId) {
                         Notification::make()
                             ->title('Selecione um usuário')
-                            ->body('Antes de agendar, selecione um usuário no Dashboard.')
+                            ->body('Clique em "Selecionar usuário" para ir ao Dashboard e escolher um EPC.')
                             ->warning()
                             ->send();
 
